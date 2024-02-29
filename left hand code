@@ -1,0 +1,489 @@
+# left hand algorithm code for solving a micro mouse maze 
+
+include <PIDController.h>
+#include <PID_v1_bc.h>
+#include <NewPing.h>
+//ONLY MOVES FORWARD 
+long distance =0 ;
+
+/**** IR PINS ****/
+const byte IRFL = 12;  // the IR sensor on the left
+const byte IRFR = 13;  // the IR sensor on the right
+
+/**** ENCODER PINS ****/
+const byte LEFT_ENCODER_A = 2;  // hardware interrupt
+const byte LEFT_ENCODER_B = 3;
+const byte RIGHT_ENCODER_A = 4;  // hardware interrupt
+const byte RIGHT_ENCODER_B = 5;
+
+/**** MOTOR PINS ****/
+const byte IN1 = 6;  // Left Motor Negative
+const byte IN2 = 7;  // Left Motor Positive
+
+const byte IN3 = 8;  // Right Motor Negative
+const byte IN4 = 9;  // Right Motor Positive
+
+const byte ENL = 10;  // Enable for Left motor
+const byte ENR = 11;  // Enable for Right motor
+
+/**** ULTRASONIC PINS ****/
+const int FRONT_TRIG_PIN = A1;
+const int FRONT_ECHO_PIN = A0;
+
+NewPing sonar(FRONT_TRIG_PIN, FRONT_ECHO_PIN, 300); // Front ultrasonic sensor
+
+/***** FOR PIDs *****/
+// encoder counts
+volatile long int encoderCountR = 0;
+volatile long int encoderCountL = 0;
+
+volatile long int prevEncoderCountR = -1000000;
+volatile long int prevEncoderCountL = -1000000;
+const int TARGET_COUNT = 250; // Adjust this value based on your robot's characteristics and the distance you want it to travel
+
+
+// PID controller for each Motor
+double kp = 2, ki = 5, kd = 1;
+
+double error = 0, desired = 0, dPWM = 0;
+volatile double currentError = 0;
+
+PID pidNew(&error, &dPWM, &desired, kp, ki, kd, DIRECT);
+
+int timerCounter = 42098;
+
+volatile int state = 0;  // 0 => forward, 1=> left, 2=> right
+
+void setup() {
+  Serial.begin(9600);
+
+  cli();
+  // Encoder Pins as inputs
+  pinMode(LEFT_ENCODER_A, INPUT);
+  pinMode(LEFT_ENCODER_B, INPUT);
+  pinMode(RIGHT_ENCODER_A, INPUT);
+  pinMode(RIGHT_ENCODER_B, INPUT);
+
+  // H-bridge pins as output
+  // Motors positive and negative pins
+  pinMode(IN1, OUTPUT);
+  pinMode(IN2, OUTPUT);
+  pinMode(IN3, OUTPUT);
+  pinMode(IN4, OUTPUT);
+  // Enable pins
+  pinMode(ENL, OUTPUT);
+  pinMode(ENR, OUTPUT);
+
+  // IR sensors as inputs
+  pinMode(IRFL, INPUT);
+  pinMode(IRFR, INPUT);
+
+  // Ultra Sonic sensor
+  pinMode(FRONT_TRIG_PIN, OUTPUT);  // Sets the trigPin as an OUTPUT
+  pinMode(FRONT_ECHO_PIN, INPUT);   // Sets the echoPin as an INPUT
+
+  // Set the H-bridge inputs to LOW
+  digitalWrite(IN1, LOW);
+  digitalWrite(IN2, LOW);
+  digitalWrite(IN3, LOW);
+  digitalWrite(IN4, LOW);
+
+  // PIDs as automatic
+  pidNew.SetMode(AUTOMATIC);
+
+  // Set the H-bridge inputs 2 and 4 to High
+  digitalWrite(IN2, HIGH);
+  digitalWrite(IN4, HIGH);
+
+  // limits for the PIDs 
+  pidNew.SetOutputLimits(0, 20);
+
+  // set encoder pins B from both motor encoders as hardware interrupts. Put them as rising 
+  attachInterrupt(digitalPinToInterrupt(RIGHT_ENCODER_A), updateEncoderR, RISING);
+  attachInterrupt(digitalPinToInterrupt(LEFT_ENCODER_A), updateEncoderL, RISING);
+
+
+  TCCR0A = 0;
+  TCCR0B = 0;
+  TCNT0 = timerCounter;                 // preload timer
+  TCCR0B |= (1 << CS02) | (1 << CS00);  // 1024 prescaler for Timer 0
+  TIMSK0 |= (1 << TOIE0);               // enable timer overflow interrupt
+
+  sei();
+  delay(1000);
+}
+
+int rightCount = 0;  // number of consecutive right turns
+int leftCount = 0;   // number of consecutive left turns
+
+void loop() {
+  // Measure distance using ultrasonic sensor
+  digitalWrite(FRONT_TRIG_PIN, LOW);
+    delayMicroseconds(2);
+  digitalWrite(FRONT_TRIG_PIN, HIGH);
+    delayMicroseconds(10);  // Wait for the sensor to send out the ultrasonic pulse
+
+  digitalWrite(FRONT_TRIG_PIN, LOW);
+  long duration = pulseIn(FRONT_ECHO_PIN, HIGH );
+  // Calculate distance in centimeters
+  distance = duration * 0.034 / 2;
+
+  Serial.print("Distance: ");
+  Serial.print(distance);
+  Serial.println(" cm");
+bool obstacleDetected = distance <= 5;
+
+
+    // Check left and right sensors
+    bool leftClear = digitalRead(IRFL) ;
+    bool rightClear = digitalRead(IRFR) ;
+if (rightCount == 3 || leftCount == 3) {  // if goal is reached
+    stopAll();
+    delay(500);
+    exit(0);
+  }
+  // Check for obstacles in front
+  if (distance < 7) { // Adjust distance threshold as needed
+    Serial.println("FRONT Obstacle detected!");
+     stopAll();
+
+    Serial.print("Left IR sensor: ");
+    Serial.println(leftClear ? "Clear" : "Blocked");
+    Serial.print("Right IR sensor: ");
+    Serial.println(rightClear ? "Clear" : "Blocked");
+
+    if (leftClear && !rightClear) {
+      Serial.println("Turning left.");
+      leftCount++;
+
+      // Turn left
+      turn_left(60,70);
+      forward(70);
+      delay(500);
+
+    } else if (!leftClear && rightClear) {
+      Serial.println("Turning right.");
+      rightCount++;
+      // Turn right
+      turn_right(50,65);
+      forward(80);
+      delay(500);
+
+    } else if (leftClear && rightClear) {
+      Serial.println("Both sides clear, turning left.");
+      // Turn left
+      leftCount++;
+      turn_left(60,70);
+      forward(70);
+    delay(500);
+    
+    
+    // }else if (!leftClear && !rightClear && distance <=5 ){
+    //   turn_right(50,100);
+    //   forward(70);
+    //   delay(500);
+  } 
+  }else {
+    
+// Check for left turn while moving forward
+    if (leftClear) {
+      Serial.println("Left turn detected while moving forward.");
+      leftCount++;
+      // Turn left  
+      // forward(20); 
+      // delay(50) ;     
+      turn_left(35,70);
+      delay(50) ;     
+    forward(60);
+
+ //  long distance2=getDistance();
+  //  while (obstacleDetected) {
+  //     long distance2 = getDistance();
+  //       stopAll();
+  //             delay(50) ;     
+
+  // //                               break; // Exit the while loop
+
+  //     }
+          delay(100);
+
+
+  //  }
+    }else {
+      // Move forward
+
+      forward(70);
+
+    }    // Move forward
+     
+    }
+  
+
+
+}
+long getDistance() {
+  // Clear the trigger
+  digitalWrite(FRONT_TRIG_PIN, LOW);
+  
+  // Sets the trigger pin to HIGH state for 10 microseconds
+  digitalWrite(FRONT_TRIG_PIN, HIGH);
+  digitalWrite(FRONT_TRIG_PIN, LOW);
+  
+  // Reads the echo pin, and returns the sound wave travel time in microseconds
+  long duration = pulseIn(FRONT_ECHO_PIN, HIGH);
+  
+  // Calculating the distance
+  long distance = duration * 0.034 / 2; // Speed of sound wave divided by 2 (go and back)
+  
+  // Returns the distance
+  return distance;
+}
+
+
+void forward2(int speed) {
+   encoderCountL = 0;  //  reset counter A to zero
+  encoderCountR = 0;  //  reset counter B to zero
+  digitalWrite(IN1, LOW);   // Set Motor A direction
+  digitalWrite(IN2, HIGH);  // Set Motor A direction
+
+  digitalWrite(IN3, LOW);   // Set Motor B direction
+  digitalWrite(IN4, HIGH);  // Set Motor B direction
+
+  analogWrite(ENL, speed);  // Set Motor A speed
+  analogWrite(ENR, speed);  // Set Motor B speed
+}
+
+// void forward(int speed) {
+
+//    encoderCountL = 0;  //  reset counter A to zero
+//   encoderCountR = 0;  //  reset counter B to zero
+//   digitalWrite(IN1, LOW);   // Set Motor A direction
+//   digitalWrite(IN2, HIGH);  // Set Motor A direction
+
+//   digitalWrite(IN3, LOW);   // Set Motor B direction
+//   digitalWrite(IN4, HIGH);  // Set Motor B direction
+
+//   analogWrite(ENL, speed);  // Set Motor A speed
+//   analogWrite(ENR, speed);  // Set Motor B speed
+//   // while (digitalRead(IRFL) && digitalRead(IRFR) == 0) {  // (encoderCountR + encoderCountL)/2 <=200
+//   //   myPID(speed);
+//   // }
+
+
+// }
+
+void forward(int speed) {
+  encoderCountL = 0;  // Reset left encoder count
+  encoderCountR = 0;  // Reset right encoder count
+  digitalWrite(IN1, LOW);   // Set Motor A direction
+  digitalWrite(IN2, HIGH);  // Set Motor A direction
+  digitalWrite(IN3, LOW);   // Set Motor B direction
+  digitalWrite(IN4, HIGH);  // Set Motor B direction
+  analogWrite(ENL, speed);  // Set Motor A speed
+  analogWrite(ENR, speed);  // Set Motor B speed
+
+  while (true) {
+    // Check for obstacles
+    digitalWrite(FRONT_TRIG_PIN, LOW);
+    delayMicroseconds(2);
+    digitalWrite(FRONT_TRIG_PIN, HIGH);
+    delayMicroseconds(10);
+    digitalWrite(FRONT_TRIG_PIN, LOW);
+    long duration = pulseIn(FRONT_ECHO_PIN, HIGH);
+    long distance = duration * 0.034 / 2;
+
+    if (distance < 7) { // Adjust distance threshold as needed
+      Serial.println("Obstacle detected while moving forward! Stopping...");
+      stopAll();
+      break;
+    }
+
+    // Check if both encoders have reached a certain count
+    if (encoderCountL >= TARGET_COUNT && encoderCountR >= TARGET_COUNT) {
+      Serial.println("Forward movement completed.");
+      stopAll();
+      break;
+    }
+  }
+}
+
+void myPID(int mspeed) {
+  int frontDistance = wallFront();
+  if (frontDistance > 0 && frontDistance < 15) { // If obstacle detected in front, stop
+    stopAll();
+    delay(100);
+    return;
+  }
+  
+  int leftWall = digitalRead(IRFL) == LOW ? 0 : 1;
+  int rightWall = digitalRead(IRFR) == LOW ? 0 : 1;
+  
+  if (rightWall == 0) {
+    currentError = 5; // Adjust this value accordingly
+  } else if (leftWall == 0) {
+    currentError = -5; // Adjust this value accordingly
+  } else {
+    currentError = 0;
+  }
+
+  if (currentError > 0) {
+    analogWrite(ENL, mspeed + 10);
+    analogWrite(ENR, mspeed - 10);
+  } else if (currentError < 0) {
+    analogWrite(ENL, mspeed - 10);
+    analogWrite(ENR, mspeed + 10);
+  } else {
+    analogWrite(ENL, 70);
+    analogWrite(ENR, 70);
+  }
+}
+
+void updateEncoderL() {
+  if (digitalRead(LEFT_ENCODER_B) == LOW) {
+    encoderCountL--;
+  } else {
+    encoderCountL++;
+  }
+}
+
+void updateEncoderR() {
+  if (digitalRead(RIGHT_ENCODER_B) == LOW) {
+    encoderCountR++;
+  } else {
+    encoderCountR--;
+  }
+}
+
+void stopAll() {
+  digitalWrite(IN1, LOW);
+  digitalWrite(IN2, LOW);
+  digitalWrite(IN3, LOW);
+  digitalWrite(IN4, LOW);
+  analogWrite(ENL, 0);
+  analogWrite(ENR, 0);
+}
+
+int wallFront() {
+  return sonar.ping_cm();
+}
+
+void turn_left(int steps, int mspeed) {
+    encoderCountL = 0;  //  reset counter A to zero
+    encoderCountR = 0;  //  reset counter B to zero
+
+
+     // Set Motor A forward
+  digitalWrite(IN2, LOW);
+  digitalWrite(IN1, HIGH);
+  // Set Motor B forward
+  digitalWrite(IN4, HIGH);
+  digitalWrite(IN3, LOW);
+
+    error = 0;
+    // Go forward until step value is reached
+    while (steps > (encoderCountL + encoderCountR) / 2) {
+        myPID2();
+
+        //slow M2, accelerate M1 speed
+        if (error >= 0) {
+            if (steps > encoderCountL) {
+                analogWrite(ENL, mspeed + (dPWM / 2));
+            }
+            if (steps > encoderCountR) {
+                analogWrite(ENR, mspeed - (dPWM / 2));
+            }
+        }
+        //slow M1, accelerate M2 speed
+        if (error < 0) {
+            if (steps > encoderCountL) {
+                analogWrite(ENL, mspeed - (dPWM / 2));
+            }
+            if (steps > encoderCountR) {
+               analogWrite(ENR, mspeed + (dPWM / 2));
+            }
+        }
+    }
+    // Stop when done
+    stopAll();
+    delay(100);
+     // Move forward a little after turning left
+}
+void moveForwardSteps(int steps, int mspeed) {
+    encoderCountL = 0;  // Reset left encoder count
+    encoderCountR = 0;  // Reset right encoder count
+
+digitalWrite(IN1, LOW);   // Set Motor A direction
+  digitalWrite(IN2, HIGH);  // Set Motor A direction
+
+  digitalWrite(IN3, LOW);   // Set Motor B direction
+  digitalWrite(IN4, HIGH);  // Set Motor B direction
+
+    // Set motor speeds
+    analogWrite(ENL, mspeed);
+    analogWrite(ENR, mspeed);
+
+        // Move forward until step value is reached
+    while (encoderCountL <= steps && encoderCountR <= steps) {
+        // Set motor speeds
+        analogWrite(ENL, 0);
+        analogWrite(ENR, 0);
+    }
+
+    // Stop when done
+    stopAll();
+
+}
+
+
+void turn_right(int duration, int mspeed) {
+    // Set Motor A forward
+    digitalWrite(IN2, HIGH);
+    digitalWrite(IN1, LOW);
+    // Set Motor B forward
+    digitalWrite(IN4, LOW);
+    digitalWrite(IN3, HIGH);
+
+    // Set motor speeds
+    analogWrite(ENL, mspeed);
+    analogWrite(ENR, mspeed);
+
+    // Delay for the specified duration
+    delay(duration);
+
+    // Stop both motors
+    stopAll();
+    delay(100);
+}
+
+
+
+
+
+void myPID2() {
+  error = encoderCountR - encoderCountL;
+  pidNew.Compute();
+}
+// ISR function for Timer0 overflow
+// ISR(TIMER0_OVF_vect) {
+//   // Measure distance using ultrasonic sensor
+//   digitalWrite(FRONT_TRIG_PIN, LOW);
+//   delayMicroseconds(2);
+//   digitalWrite(FRONT_TRIG_PIN, HIGH);
+//   delayMicroseconds(10);
+//   digitalWrite(FRONT_TRIG_PIN, LOW);
+//   long duration = pulseIn(FRONT_ECHO_PIN, HIGH);
+//   // Calculate distance in centimeters
+//   long distance = duration * 0.034 / 2;
+
+//   // Check if distance is less than 5 cm
+//   if (distance < 5) {
+//     // Set obstacleDetected flag
+//     obstacleDetected = true;
+//   } else {
+//     // Clear obstacleDetected flag
+//     obstacleDetected = false;
+//   }
+
+//   // Reload timer counter
+//   TCNT0 = timerCounter;
+// }
